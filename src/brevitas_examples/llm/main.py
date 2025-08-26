@@ -76,6 +76,19 @@ except:
     logging.debug("Shark-AI not installed, cannot export to Shark")
 
 
+
+import transformers.masking_utils as masking_utils
+
+# Convert registry to dict before Dynamo tracing
+try:
+    if hasattr(masking_utils.ALL_MASK_ATTENTION_FUNCTIONS, "_global_mapping"):
+        masking_utils.ALL_MASK_ATTENTION_FUNCTIONS._global_mapping = dict(
+            masking_utils.ALL_MASK_ATTENTION_FUNCTIONS._global_mapping
+        )
+except Exception as e:
+    print(f"Warning: failed to patch attention registry: {e}")
+
+
 def filter_results(results, tasks):
     # filter out what we actually want to track
     eval_results = dict()
