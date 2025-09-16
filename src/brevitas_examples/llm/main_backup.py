@@ -67,8 +67,6 @@ from brevitas_examples.llm.llm_quant.rotation_optimization import parse_rotation
 from brevitas_examples.llm.llm_quant.run_utils import fix_rewriter
 from brevitas_examples.llm.llm_quant.svd_quant import apply_svd_quant
 
-from brevitas_examples.llm.export_parameters import export_parameters
-
 logging = setup_logger(__name__)
 
 try:
@@ -556,20 +554,17 @@ def quantize_llm(args, extra_args=None):
             model = offload_model(model)
 
         if args.load_checkpoint:
-            import brevitas.nn as qnn
             remove_hooks(model)
             with load_quant_model_mode(model):
                 model.load_state_dict(torch.load(args.checkpoint_name, map_location='cpu'))
             model.eval()
-
             for name, module in model.named_modules():
-
-                # if isinstance(module, qnn.QuantLinear):
-                #     print(f"{name}")
-                # if isinstance(module, torch.nn.RMSNorm):
                 #     print(f"{name}", f"{module}")
 
-                if isinstance(module, qnn.QuantLinear) and name == "model.layers.0.self_attn.q_proj":
+                import brevitas.nn as qnn
+                
+                
+                if isinstance(module, qnn.QuantLinear):
                     qw = module.quant_weight()
                     print(f"{name}")
                     print(torch.unique(qw.value / qw.scale))
@@ -578,83 +573,59 @@ def quantize_llm(args, extra_args=None):
                     print(qw.zero_point)
                     print(qw.signed)
 
-                    # In case you want to test the activation quantization function
-                    qi = module.input_quant
-                    x = torch.arange(1, module.in_features + 1, 1, device=model.device, dtype=model.dtype) * 0.001 + 1.5 
-                    # quant input scale:  tensor([0.2365], quant input zero:  tensor([0.]) why?
-                    x = torch.arange(1, module.in_features + 1, 1, device=model.device, dtype=model.dtype) * 0.001 - 1.5 
-                    # quant input scale:  tensor([0.1365], quant input zero:  tensor([10.984]) = - 1.499/0.1365, correct
+                    # # In case you want to test the activation quantization function
+                    # qi = module.input_quant
+                    # x = torch.rand((2,module.in_features), device=model.device, dtype=model.dtype)
+                    # qx = qi(x)
+                    # print(torch.unique((qx.value / qx.scale) - qx.zero_point))
+                    # #print(qx.scale) # Dynamic!
+                    # #print(qx.zero_point) # Dynamic!
+                    # print(qx.bit_width)
+                    # print(qx.signed_t)
+                elif isinstance(module, qnn.QuantScaledDotProductAttention):
+                    H = 32
+                    D = 64
+                    S = 2048  # any small seq length > 1 works for probing
+                    q = torch.randn(1, H, S, D, device=model.device, dtype=model.dtype)
+                    kT = torch.randn(1, H, D, S, device=model.device, dtype=model.dtype)
+                    scores = torch.randn(1, H, S, S, device=model.device, dtype=model.dtype)
+                    v = torch.randn(1, H, S, D, device=model.device, dtype=model.dtype)
 
-                    # x = torch.rand((1,module.in_features), device=model.device, dtype=model.dtype)
-                    print("input: ", x)
-                    qx = qi(x)
-                    print("qinput: ", qx.value)
-                    print("quant input: ", torch.round(x / qx.scale + qx.zero_point))
-                    print("quant input scale: ", qx.scale) # Dynamic!
-                    print("quant input zero: ", qx.zero_point) # Dynamic!
-                    print("quant input: ", qx.bit_width)
-                    print("quant input: ", qx.signed_t)
-                    y = module(x)
-                    print("output: ", y)
+                    INTERESTED = {
+                        "attn-q_scaled_quant",
+                        "attn-k_transposed_quant",
+                        "attn-v_quant",
+                        "attn-attn_output_weights_quant",
+                    }
 
+                    for ni, qi in module.named_modules():
+                        if isinstance(qi, qnn.QuantIdentity):
+                            full_name = f"{name}-{ni}"
+                            if any(tag in full_name for tag in INTERESTED):
+                                print(full_name)
+                                rqt = qi.return_quant_tensor
+                                qi.return_quant_tensor = True
+                                if "q_scaled_quant" in full_name:
+                                    qa = qi(q)
+                                elif "k_transposed_quant" in full_name:
+                                    qa = qi(kT)
+                                elif "v_quant" in full_name:
+                                    qa = qi(v)
+                                elif "attn_output_weights_quant" in full_name:
+                                    qa = qi(scores)
 
-
-            #     elif isinstance(module, qnn.QuantScaledDotProductAttention):
-            #         H = 32
-            #         D = 64
-            #         S = 2048  # any small seq length > 1 works for probing
-            #         q = torch.randn(1, H, S, D, device=model.device, dtype=model.dtype)
-            #         kT = torch.randn(1, H, D, S, device=model.device, dtype=model.dtype)
-            #         scores = torch.randn(1, H, S, S, device=model.device, dtype=model.dtype)
-            #         v = torch.randn(1, H, S, D, device=model.device, dtype=model.dtype)
-
-            #         INTERESTED = {
-            #             "attn-q_scaled_quant",
-            #             "attn-k_transposed_quant",
-            #             "attn-v_quant",
-            #             "attn-attn_output_weights_quant",
-            #         }
-
-            #         for ni, qi in module.named_modules():
-            #             if isinstance(qi, qnn.QuantIdentity):
-            #                 full_name = f"{name}-{ni}"
-            #                 if any(tag in full_name for tag in INTERESTED):
-            #                     print(full_name)
-            #                     rqt = qi.return_quant_tensor
-            #                     qi.return_quant_tensor = True
-            #                     if "q_scaled_quant" in full_name:
-            #                         qa = qi(q)
-            #                     elif "k_transposed_quant" in full_name:
-            #                         qa = qi(kT)
-            #                     elif "v_quant" in full_name:
-            #                         qa = qi(v)
-            #                     elif "attn_output_weights_quant" in full_name:
-            #                         qa = qi(scores)
-
-            #                     qi.return_quant_tensor = rqt
-            #                     print(qa.scale)
-            #                     print(qa.bit_width)
-            #                     print(qa.zero_point)
-            #                     print(qa.signed_t)
+                                qi.return_quant_tensor = rqt
+                                print(qa.scale)
+                                print(qa.bit_width)
+                                print(qa.zero_point)
+                                print(qa.signed_t)
                             
-            #     # elif isinstance(module, qnn.equalized_layer.RotatedModule):
-            #     #     x = torch.eye(module.layer.in_features, device=model.device, dtype=model.dtype)
-            #     #     had = module.rotate(x)
-            #     #     print(had.shape)
-            #     #     print(had[:4,:4])
-            #     #     print(had[:8,:8])
-
-            # export_parameters(
-            #     model,
-            #     decoder_layer_num=16,
-            #     head_num=32,          # Q/A
-            #     kv_head_num=8,        # K/V
-            #     hidden_dim=2048,
-            #     kv_hidden_dim=512,
-            #     bin_dir = "parameters",
-            #     hdr_dir = "parameters",
-            # )
-        
+                # elif isinstance(module, qnn.equalized_layer.RotatedModule):
+                #     x = torch.eye(module.layer.in_features, device=model.device, dtype=model.dtype)
+                #     had = module.rotate(x)
+                #     print(had.shape)
+                #     print(had[:4,:4])
+                #     print(had[:8,:8])
             model = offload_model(model)
 
         if args.gptq and not args.load_checkpoint:
@@ -798,8 +769,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-#  cd /home/jameszhang23/brevitas
-#  export PYTHONPATH=$PWD/src:$PYTHONPATH
-#  python main.py --config ucla_spinquant_w4a4a8_merger2_static_qkvs_qlmhead_best.yaml --model meta-llama/Llama-3.2-1B --checkpoint-name llama3.2-1b.pth 
-#  python main.py --config ucla_spinquant_w4a4a8_merger2_static_qkvs_qlmhead_best.yaml --model meta-llama/Llama-3.2-1B --checkpoint-name llama3.2-1b.pth --load-checkpoint
